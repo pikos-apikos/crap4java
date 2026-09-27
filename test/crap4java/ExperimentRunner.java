@@ -9,9 +9,11 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.Callable;
 import java.util.stream.Stream;
@@ -24,9 +26,13 @@ import org.jacoco.core.tools.ExecFileLoader;
 
 import java.lang.classfile.ClassFile;
 import java.lang.classfile.ClassModel;
+import java.lang.classfile.CodeModel;
+import java.lang.classfile.Label;
 import java.lang.classfile.MethodModel;
 import java.lang.classfile.instruction.ExceptionCatch;
 import java.lang.classfile.instruction.LineNumber;
+import java.lang.classfile.instruction.LookupSwitchInstruction;
+import java.lang.classfile.instruction.TableSwitchInstruction;
 import java.lang.reflect.AccessFlag;
 
 /** Runs the source-oracle and bytecode-candidate arms on one fixed evidence set. */
@@ -37,8 +43,10 @@ public final class ExperimentRunner {
             Map.entry("loop", "loops"),
             Map.entry("shortCircuit", "&& / ||"),
             Map.entry("switchCases", "switch"),
+            Map.entry("switchWithoutDefault", "switch without explicit default"),
             Map.entry("plainTryCatch", "plain try/catch"),
             Map.entry("multiCatch", "multi-catch"),
+            Map.entry("multipleCatchClauses", "multiple catch clauses"),
             Map.entry("nestedCatch", "nested catches"),
             Map.entry("tryFinally", "try/finally"),
             Map.entry("tryWithResources", "try-with-resources"),
@@ -54,6 +62,7 @@ public final class ExperimentRunner {
     private static final Map<String, String> EXCEPTION_CASES = Map.of(
             "plain try/catch", "plainTryCatch",
             "multi-catch", "multiCatch",
+            "multiple catch clauses", "multipleCatchClauses",
             "nested catches", "nestedCatch",
             "try/finally", "tryFinally",
             "try-with-resources", "tryWithResources",
@@ -95,6 +104,12 @@ public final class ExperimentRunner {
         System.out.printf("Source methods: %d; bytecode methods: %d; unique matches: %d; CC mismatches: %d%n",
                 source.value().methods().size(), bytecode.value().methods().size(),
                 comparison.uniquePairs(), comparison.ccMismatches().size());
+        System.out.printf("Source-aligned bytecode CC: %d exact; %d residual mismatches; %d unavailable%n",
+                comparison.sourceAlignedExactMatches().size(),
+                comparison.sourceAlignedMismatches().size(), comparison.sourceAlignedUnavailable());
+        if (!comparison.sourceAlignedMismatches().isEmpty() || comparison.sourceAlignedUnavailable() != 0) {
+            throw new IllegalStateException("Source-aligned bytecode complexity did not reach parity; see experiment/results/report.md");
+        }
     }
 
     private static <T> Timed<T> measure(Callable<T> analysis, int warmups, int iterations) throws Exception {
@@ -117,9 +132,11 @@ public final class ExperimentRunner {
             for (Path path : paths.filter(p -> p.toString().endsWith(".java")).sorted().toList()) {
                 String source = Files.readString(path);
                 String file = sourceRoot.relativize(path).toString().replace('\\', '/');
-                for (MethodDescriptor method : JavaMethodParser.parse(path.getFileName().toString(), source)) {
+                for (JavaMethodParser.MethodAnalysis method :
+                        JavaMethodParser.analyze(path.getFileName().toString(), source)) {
                     methods.add(new SourceMethod(file, method.name(), method.startLine(), method.endLine(),
-                            method.complexity(), construct(method.name())));
+                            method.complexity(), method.defaultCases(), method.catchClauses(),
+                            construct(method.name())));
                 }
             }
         }
@@ -149,16 +166,25 @@ public final class ExperimentRunner {
                             .map(LineNumber.class::cast)
                             .map(LineNumber::line)
                             .distinct().sorted().toList();
-                    List<String> handlerTypes = method.code().stream()
-                            .flatMap(code -> code.exceptionHandlers().stream())
+                    List<ExceptionCatch> exceptionHandlers = method.code().stream()
+                            .flatMap(code -> code.exceptionHandlers().stream()).toList();
+                    List<String> handlerTypes = exceptionHandlers.stream()
                             .map(ExperimentRunner::handlerType)
                             .sorted().toList();
+                    int switchCount = method.code().stream()
+                            .flatMap(CodeModel::elementStream)
+                            .mapToInt(element -> element instanceof TableSwitchInstruction
+                                    || element instanceof LookupSwitchInstruction ? 1 : 0)
+                            .sum();
+                    int typedHandlerTargetCount = distinctHandlerTargetCount(exceptionHandlers, true);
+                    int catchAllHandlerTargetCount = distinctHandlerTargetCount(exceptionHandlers, false);
                     String key = jacocoKey(owner, name, descriptor);
                     JacocoMethod coverage = jacoco.get(key);
                     methods.add(new BytecodeMethod(sourceFile, owner.replace('/', '.'), name, descriptor,
                             lines, coverage == null ? null : coverage.complexity(),
                             coverage == null ? null : coverage.coveredInstructions(),
                             coverage == null ? null : coverage.totalInstructions(), handlerTypes,
+                            switchCount, typedHandlerTargetCount, catchAllHandlerTargetCount,
                             method.flags().has(AccessFlag.SYNTHETIC), method.flags().has(AccessFlag.BRIDGE),
                             method.flags().has(AccessFlag.SYNCHRONIZED), method.code().isPresent()));
                 }
@@ -189,6 +215,16 @@ public final class ExperimentRunner {
 
     private static String handlerType(ExceptionCatch handler) {
         return handler.catchType().map(type -> type.asInternalName().replace('/', '.')).orElse("catch-all");
+    }
+
+    private static int distinctHandlerTargetCount(List<ExceptionCatch> handlers, boolean typed) {
+        Set<Label> targets = new HashSet<>();
+        for (ExceptionCatch handler : handlers) {
+            if (handler.catchType().isPresent() == typed) {
+                targets.add(handler.handler());
+            }
+        }
+        return targets.size();
     }
 
     private static String jacocoKey(String owner, String name, String descriptor) {
@@ -241,6 +277,14 @@ public final class ExperimentRunner {
         List<MethodPair> mismatches = pairs.stream().filter(pair -> pair.bytecode().jacocoComplexity() != null)
                 .filter(pair -> pair.source().complexity() != pair.bytecode().jacocoComplexity()).toList();
         long noJacoco = pairs.stream().filter(pair -> pair.bytecode().jacocoComplexity() == null).count();
+        List<MethodPair> alignedExact = pairs.stream()
+                .filter(pair -> sourceAlignedBytecodeComplexity(pair) != null)
+                .filter(pair -> pair.source().complexity() == sourceAlignedBytecodeComplexity(pair)).toList();
+        List<MethodPair> alignedMismatches = pairs.stream()
+                .filter(pair -> sourceAlignedBytecodeComplexity(pair) != null)
+                .filter(pair -> pair.source().complexity() != sourceAlignedBytecodeComplexity(pair)).toList();
+        long alignedUnavailable = pairs.stream()
+                .filter(pair -> sourceAlignedBytecodeComplexity(pair) == null).count();
         Map<String, Long> mismatchCounts = new TreeMap<>();
         for (MethodPair mismatch : mismatches) {
             mismatchCounts.merge(mismatch.source().construct(), 1L, Long::sum);
@@ -249,8 +293,20 @@ public final class ExperimentRunner {
         for (BytecodeMethod method : bytecodeOnly) {
             bytecodeOnlyReasons.merge(bytecodeOnlyReason(method), 1L, Long::sum);
         }
-        return new Comparison(pairs, exact, mismatches, noJacoco, sourceOnly, ambiguousSources,
+        return new Comparison(pairs, exact, mismatches, noJacoco, alignedExact, alignedMismatches,
+                alignedUnavailable, sourceOnly, ambiguousSources,
                 bytecodeOnly, ambiguousBytecode, mismatchCounts, bytecodeOnlyReasons, sourcesByCandidate);
+    }
+
+    private static Integer sourceAlignedBytecodeComplexity(MethodPair pair) {
+        BytecodeMethod method = pair.bytecode();
+        if (method.jacocoComplexity() == null
+                || pair.source().defaultCaseCount() > method.switchCount()
+                || pair.source().catchClauseCount() > method.typedHandlerTargetCount()) {
+            return null;
+        }
+        return method.jacocoComplexity() + pair.source().defaultCaseCount()
+                + pair.source().catchClauseCount();
     }
 
     private static String bytecodeOnlyReason(BytecodeMethod method) {
@@ -267,7 +323,7 @@ public final class ExperimentRunner {
         for (MethodPair pair : comparison.pairs()) {
             pairs.put(pair.source(), pair);
         }
-        StringBuilder csv = new StringBuilder("side,source_file,class,method,descriptor,start_line,end_line,source_cc,jacoco_cc,covered_instructions,total_instructions,exception_handler_count,exception_handler_types,synthetic,bridge,synchronized,has_code,match_status,match_candidates\n");
+        StringBuilder csv = new StringBuilder("side,source_file,class,method,descriptor,start_line,end_line,source_cc,jacoco_cc,covered_instructions,total_instructions,exception_handler_count,exception_handler_types,synthetic,bridge,synchronized,has_code,match_status,match_candidates,source_default_case_count,source_catch_clause_count,switch_instruction_count,typed_handler_target_count,catch_all_handler_target_count,source_aligned_bytecode_cc,source_aligned_status\n");
         for (SourceMethod method : source.methods()) {
             MethodPair pair = pairs.get(method);
             String status = pair == null ? comparison.ambiguousSources().contains(method) ? "ambiguous" : "source-only" : "unique-match";
@@ -280,23 +336,42 @@ public final class ExperimentRunner {
                     .reduce((a, b) -> a + " | " + b).orElse("");
             String candidateClasses = candidateMethods.stream().map(BytecodeMethod::owner).distinct().sorted()
                     .reduce((a, b) -> a + " | " + b).orElse("");
+            BytecodeMethod candidate = pair == null ? null : pair.bytecode();
+            Integer alignedCc = pair == null ? null : sourceAlignedBytecodeComplexity(pair);
             appendCsv(csv, "source", method.file(), candidateClasses, method.name(), "", method.startLine(), method.endLine(),
-                    method.complexity(), "", "", "", "", "", "", "", "", status, candidates);
+                    method.complexity(), "", "", "", "", "", "", "", "", status, candidates,
+                    method.defaultCaseCount(), method.catchClauseCount(),
+                    candidate == null ? "" : candidate.switchCount(),
+                    candidate == null ? "" : candidate.typedHandlerTargetCount(),
+                    candidate == null ? "" : candidate.catchAllHandlerTargetCount(), alignedCc,
+                    alignedStatus(pair, alignedCc));
         }
         for (BytecodeMethod method : bytecode.methods()) {
             String status = comparison.ambiguousBytecode().contains(method) ? "ambiguous"
                     : comparison.pairs().stream().anyMatch(pair -> pair.bytecode().equals(method)) ? "unique-match" : "bytecode-only";
-            String sourceCc = comparison.pairs().stream().filter(pair -> pair.bytecode().equals(method))
-                    .map(pair -> Integer.toString(pair.source().complexity())).findFirst().orElse("");
+            MethodPair pair = comparison.pairs().stream().filter(candidate -> candidate.bytecode().equals(method))
+                    .findFirst().orElse(null);
+            String sourceCc = pair == null ? "" : Integer.toString(pair.source().complexity());
+            Integer alignedCc = pair == null ? null : sourceAlignedBytecodeComplexity(pair);
             appendCsv(csv, "bytecode", method.sourceFile(), method.owner(), method.name(), method.descriptor(),
                     method.lines().stream().min(Integer::compareTo).orElse(null),
                     method.lines().stream().max(Integer::compareTo).orElse(null), sourceCc,
                     method.jacocoComplexity(), method.coveredInstructions(), method.totalInstructions(),
                     method.handlerTypes().size(), String.join(";", method.handlerTypes()), method.synthetic(),
                     method.bridge(), method.synchronizedMethod(), method.hasCode(), status,
-                    comparison.sourceCandidatesFor(method));
+                    comparison.sourceCandidatesFor(method),
+                    pair == null ? "" : pair.source().defaultCaseCount(),
+                    pair == null ? "" : pair.source().catchClauseCount(), method.switchCount(),
+                    method.typedHandlerTargetCount(), method.catchAllHandlerTargetCount(), alignedCc,
+                    alignedStatus(pair, alignedCc));
         }
         Files.writeString(path, csv, StandardCharsets.UTF_8);
+    }
+
+    private static String alignedStatus(MethodPair pair, Integer alignedCc) {
+        if (pair == null) return "unmapped";
+        if (alignedCc == null) return "insufficient-bytecode-evidence";
+        return alignedCc == pair.source().complexity() ? "exact" : "mismatch";
     }
 
     private static void appendCsv(StringBuilder csv, Object... values) {
@@ -337,7 +412,10 @@ public final class ExperimentRunner {
                 .append(", \"ambiguousBytecodeMappings\": ").append(comparison.ambiguousBytecode().size())
                 .append(", \"exactCcMatches\": ").append(comparison.exactMatches().size())
                 .append(", \"ccMismatches\": ").append(comparison.ccMismatches().size())
-                .append(", \"ccUnavailable\": ").append(comparison.noJacoco()).append("},");
+                .append(", \"ccUnavailable\": ").append(comparison.noJacoco())
+                .append(", \"sourceAlignedExactCcMatches\": ").append(comparison.sourceAlignedExactMatches().size())
+                .append(", \"sourceAlignedCcMismatches\": ").append(comparison.sourceAlignedMismatches().size())
+                .append(", \"sourceAlignedCcUnavailable\": ").append(comparison.sourceAlignedUnavailable()).append("},");
         json.append("\n  \"mismatchesByConstruct\": ").append(longMap(comparison.mismatchCounts())).append(',');
         json.append("\n  \"bytecodeOnlyByReason\": ").append(longMap(comparison.bytecodeOnlyReasons())).append(',');
         json.append("\n  \"ccMismatches\": [");
@@ -350,6 +428,33 @@ public final class ExperimentRunner {
                     .append(", \"sourceCc\": ").append(pair.source().complexity())
                     .append(", \"jacocoCc\": ").append(pair.bytecode().jacocoComplexity())
                     .append(", \"exceptionHandlerTypes\": ").append(stringArray(pair.bytecode().handlerTypes()))
+                    .append('}');
+        }
+        json.append("\n  ],");
+        json.append("\n  \"sourceAlignedCcMismatches\": [");
+        for (int i = 0; i < comparison.sourceAlignedMismatches().size(); i++) {
+            MethodPair pair = comparison.sourceAlignedMismatches().get(i);
+            if (i > 0) json.append(',');
+            json.append("\n    {\"sourceIdentity\": ").append(json(pair.source().identity()))
+                    .append(", \"bytecodeIdentity\": ").append(json(pair.bytecode().key()))
+                    .append(", \"sourceCc\": ").append(pair.source().complexity())
+                    .append(", \"sourceAlignedBytecodeCc\": ").append(sourceAlignedBytecodeComplexity(pair))
+                    .append('}');
+        }
+        json.append("\n  ],");
+        json.append("\n  \"sourceAlignedAdjustments\": [");
+        for (int i = 0; i < comparison.pairs().size(); i++) {
+            MethodPair pair = comparison.pairs().get(i);
+            if (i > 0) json.append(',');
+            Integer adjusted = sourceAlignedBytecodeComplexity(pair);
+            json.append("\n    {\"sourceIdentity\": ").append(json(pair.source().identity()))
+                    .append(", \"bytecodeIdentity\": ").append(json(pair.bytecode().key()))
+                    .append(", \"jacocoCc\": ").append(pair.bytecode().jacocoComplexity())
+                    .append(", \"sourceDefaultCases\": ").append(pair.source().defaultCaseCount())
+                    .append(", \"bytecodeSwitchInstructions\": ").append(pair.bytecode().switchCount())
+                    .append(", \"sourceCatchClauses\": ").append(pair.source().catchClauseCount())
+                    .append(", \"bytecodeTypedHandlerTargets\": ").append(pair.bytecode().typedHandlerTargetCount())
+                    .append(", \"sourceAlignedBytecodeCc\": ").append(adjusted == null ? "null" : adjusted)
                     .append('}');
         }
         json.append("\n  ],");
@@ -387,7 +492,10 @@ public final class ExperimentRunner {
                 .append("| Ambiguous bytecode mappings | ").append(comparison.ambiguousBytecode().size()).append(" |\n")
                 .append("| Exact CC matches among unique mapped methods | ").append(comparison.exactMatches().size()).append(" |\n")
                 .append("| CC mismatches among unique mapped methods | ").append(comparison.ccMismatches().size()).append(" |\n")
-                .append("| Mapped methods without JaCoCo CC | ").append(comparison.noJacoco()).append(" |\n\n");
+                .append("| Mapped methods without JaCoCo CC | ").append(comparison.noJacoco()).append(" |\n")
+                .append("| Exact matches after source-alignment adjustment | ").append(comparison.sourceAlignedExactMatches().size()).append(" |\n")
+                .append("| Residual mismatches after source-alignment adjustment | ").append(comparison.sourceAlignedMismatches().size()).append(" |\n")
+                .append("| Methods without sufficient class-file evidence for adjustment | ").append(comparison.sourceAlignedUnavailable()).append(" |\n\n");
         if (!comparison.bytecodeOnlyReasons().isEmpty()) {
             report.append("Bytecode-only methods by observable category: ");
             report.append(comparison.bytecodeOnlyReasons().entrySet().stream()
@@ -424,8 +532,27 @@ public final class ExperimentRunner {
             report.append('\n');
         }
 
+        report.append("### Source-aligned bytecode complexity\n\n")
+                .append("The normalized value is JaCoCo CC plus explicit source `default` labels and source `catch` clauses that are supported by at least one corresponding bytecode switch instruction or typed exception-handler target. A multi-catch contributes one source clause even when its handler table has multiple type entries. Catch-all cleanup handlers are not added. This aligns the experiment's bytecode value to the existing source parser; it is a calibration result, not an independent bytecode-only metric.\n\n")
+                .append("| Method | Source CC | JaCoCo CC | `default` adjustment | `catch` adjustment | Aligned bytecode CC |\n|---|---:|---:|---:|---:|---:|");
+        for (MethodPair pair : comparison.pairs()) {
+            Integer aligned = sourceAlignedBytecodeComplexity(pair);
+            if (aligned == null || aligned.equals(pair.bytecode().jacocoComplexity())) continue;
+            report.append("\n| `").append(pair.source().name()).append("`")
+                    .append(" | ").append(pair.source().complexity())
+                    .append(" | ").append(pair.bytecode().jacocoComplexity())
+                    .append(" | ").append(pair.source().defaultCaseCount())
+                    .append(" | ").append(pair.source().catchClauseCount())
+                    .append(" | ").append(aligned).append(" |");
+        }
+        if (comparison.sourceAlignedMismatches().isEmpty()) {
+            report.append("\n\nEvery uniquely mapped method with sufficient class-file evidence matches the source parser after alignment.\n\n");
+        } else {
+            report.append("\n\nResidual source-aligned mismatches remain; inspect `sourceAlignedCcMismatches` in `comparison.json`.\n\n");
+        }
+
         report.append("## Exception-handler observations\n\n")
-                .append("The JDK Class-File API reports exception-table entries, including catch types or `catch-all` entries. These entries are not treated as source catch clauses: javac also emits entries for finally and try-with-resources cleanup. No JaCoCo complexity adjustment is applied.\n\n")
+                .append("The JDK Class-File API reports exception-table entries and groups typed entries by handler target, so multi-catch entries sharing a handler are not mistaken for separate source clauses. Catch-all entries remain separate because they may represent `finally`, synchronized cleanup, or try-with-resources scaffolding.\n\n")
                 .append("| Source construct | Bytecode methods found | Exception-table entries | Handler types | Synchronized flag |\n|---|---|---:|---|---|");
         for (Map.Entry<String, String> entry : EXCEPTION_CASES.entrySet().stream().sorted(Map.Entry.comparingByKey()).toList()) {
             List<BytecodeMethod> related = bytecode.value().methods().stream().filter(m -> m.name().equals(entry.getValue())).toList();
@@ -444,7 +571,7 @@ public final class ExperimentRunner {
                 .append("# Finally runs crap4java.ExperimentRunner against those fixed files\n")
                 .append("```\n\n")
                 .append("## Evidence-limited conclusion\n\n")
-                .append("This fixture run measures parity and cost only for the listed Java constructs on this JDK and compiler output. It does not establish production replacement suitability. The exception-table evidence is not sufficient on its own to identify source catch clauses, so the candidate complexity remains unadjusted.\n\n")
+                .append("This fixture run measures parity and cost only for the listed Java constructs on this JDK. Source labels are needed to distinguish explicit `default`/`catch` constructs from implicit switch targets and compiler-generated handlers; class-file evidence confirms the corresponding branch or handler exists. The normalized result therefore does not establish a source-independent replacement for the production parser.\n\n")
                 .append("### Next experiment\n\n")
                 .append("Repeat the same fixed-evidence comparison on one larger real-world Java repository, if a local checkout is available, while retaining the same source oracle and mismatch-preservation rules.\n");
         Files.writeString(path, report, StandardCharsets.UTF_8);
@@ -538,7 +665,8 @@ public final class ExperimentRunner {
         return longArray(values);
     }
 
-    private record SourceMethod(String file, String name, int startLine, int endLine, int complexity, String construct) {
+    private record SourceMethod(String file, String name, int startLine, int endLine, int complexity,
+                                int defaultCaseCount, int catchClauseCount, String construct) {
         String identity() {
             return file + "#" + name + "@" + startLine + "-" + endLine;
         }
@@ -552,8 +680,9 @@ public final class ExperimentRunner {
 
     private record BytecodeMethod(String sourceFile, String owner, String name, String descriptor,
                                   List<Integer> lines, Integer jacocoComplexity, Integer coveredInstructions,
-                                  Integer totalInstructions, List<String> handlerTypes, boolean synthetic,
-                                  boolean bridge, boolean synchronizedMethod, boolean hasCode) {
+                                  Integer totalInstructions, List<String> handlerTypes, int switchCount,
+                                  int typedHandlerTargetCount, int catchAllHandlerTargetCount,
+                                  boolean synthetic, boolean bridge, boolean synchronizedMethod, boolean hasCode) {
         String key() {
             return owner + "#" + name + descriptor;
         }
@@ -567,6 +696,8 @@ public final class ExperimentRunner {
 
     private record Comparison(List<MethodPair> pairs, List<MethodPair> exactMatches,
                               List<MethodPair> ccMismatches, long noJacoco,
+                              List<MethodPair> sourceAlignedExactMatches,
+                              List<MethodPair> sourceAlignedMismatches, long sourceAlignedUnavailable,
                               List<SourceMethod> sourceOnly, List<SourceMethod> ambiguousSources,
                               List<BytecodeMethod> bytecodeOnly, List<BytecodeMethod> ambiguousBytecode,
                               Map<String, Long> mismatchCounts, Map<String, Long> bytecodeOnlyReasons,

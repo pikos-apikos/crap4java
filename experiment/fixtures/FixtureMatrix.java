@@ -41,6 +41,16 @@ public class FixtureMatrix {
         };
     }
 
+    static int switchWithoutDefault(int value) {
+        switch (value) {
+            case 1:
+                return 10;
+            case 2:
+                return 20;
+        }
+        return 0;
+    }
+
     static int plainTryCatch(boolean fail) {
         try {
             if (fail) {
@@ -63,6 +73,22 @@ public class FixtureMatrix {
             return kind;
         } catch (IllegalArgumentException | IllegalStateException expected) {
             return -1;
+        }
+    }
+
+    static int multipleCatchClauses(int kind) {
+        try {
+            if (kind == 1) {
+                throw new IllegalArgumentException("one");
+            }
+            if (kind == 2) {
+                throw new IndexOutOfBoundsException("two");
+            }
+            return kind;
+        } catch (IllegalArgumentException expected) {
+            return -1;
+        } catch (IndexOutOfBoundsException expected) {
+            return -2;
         }
     }
 
@@ -155,11 +181,16 @@ public class FixtureMatrix {
         shortCircuit(false, true);
         switchCases(1);
         switchCases(8);
+        switchWithoutDefault(1);
+        switchWithoutDefault(8);
         plainTryCatch(false);
         plainTryCatch(true);
         multiCatch(0);
         multiCatch(1);
         multiCatch(2);
+        multipleCatchClauses(0);
+        multipleCatchClauses(1);
+        multipleCatchClauses(2);
         nestedCatch(false);
         nestedCatch(true);
         tryFinally(false);

@@ -36,7 +36,13 @@ The run writes durable outputs to `experiment/results/`:
 - `report.md` — concise human-readable results, exact commands, and an
   evidence-limited next-experiment recommendation.
 
-Exception-table entries are evidence only. Catch and finally/resource-cleanup
-constructs can all produce entries, so the report does not infer source `catch`
-clauses or adjust JaCoCo complexity from handler counts. Ambiguous source to
-bytecode mappings remain explicit in the artifacts.
+The report preserves raw JaCoCo complexity and the five raw mismatches. It also
+checks a source-aligned candidate: raw JaCoCo CC plus one for each explicit
+source `default` and one for each source `catch` clause, provided the class file
+contains a corresponding switch instruction or typed handler target. Multi-catch
+entries are grouped by handler target; catch-all entries are excluded because
+they can be generated for `finally`, synchronization, or resource cleanup.
+Source labels disambiguate explicit constructs from compiler-generated control
+flow, so this is a parity calibration, not an independent bytecode-only metric
+and not a production CRAP change. Residual mismatches or missing evidence fail
+the experiment after the report has been written.
