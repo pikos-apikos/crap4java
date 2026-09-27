@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "generatedAtUtc": "2026-09-27T10:39:07.790080427Z",
+  "repositoryRevision": "1b95b264fc2718b1e9c465d9f71cc7c8b7ae8c1f",
+  "environment": {"javaVersion": "25.0.4.1", "javaVendor": "Eclipse Adoptium", "mavenVersion": "Apache Maven 3.9.16 (2bdd9fddda4b155ebf8000e807eb73fd829a51d5)", "os": "Linux 6.17.0-1022-azure amd64"},
+  "fixedEvidenceSha256": {"sources": "4dbbe03a1c331fb8105a8c44f415d2593d92bae649fa44fb23a11b24d85ffeda", "classFiles": "f3f9593ae8518abed39612eb78df817ee17833491ffe62c292f9db3fb1831cc0", "jacocoExec": "571b6982140900ac6788e31e4135a4c653c250425d2a0c19deeeccd999d8fb85"},
+  "measurement": {"warmupsPerArm": 2, "iterationsPerArm": 7, "sourceAnalysisNanos": [11765763, 8008284, 9737692, 9600673, 9406568, 9385881, 8088519], "bytecodeAnalysisNanos": [5821096, 6098550, 5589342, 4850653, 4627861, 5750293, 4506321]},
+  "counts": {"sourceMethods": 19, "bytecodeMethods": 25, "uniqueSourceBytecodePairs": 19, "sourceOnly": 0, "ambiguousSourceMappings": 0, "bytecodeOnly": 6, "ambiguousBytecodeMappings": 0, "exactCcMatches": 14, "ccMismatches": 5, "ccUnavailable": 0},
+  "mismatchesByConstruct": {"multi-catch": 1, "nested catches": 1, "plain try/catch": 1, "switch": 1, "try-with-resources": 1},
+  "bytecodeOnlyByReason": {"bridge method": 1, "constructor": 4, "synthetic/compiler-generated": 1},
+  "ccMismatches": [
+    {"construct": "switch", "sourceIdentity": "FixtureMatrix.java#switchCases@35-42", "bytecodeIdentity": "experiment.fixtures.FixtureMatrix#switchCases(I)I", "sourceCc": 5, "jacocoCc": 4, "exceptionHandlerTypes": []},
+    {"construct": "plain try/catch", "sourceIdentity": "FixtureMatrix.java#plainTryCatch@44-53", "bytecodeIdentity": "experiment.fixtures.FixtureMatrix#plainTryCatch(Z)I", "sourceCc": 3, "jacocoCc": 2, "exceptionHandlerTypes": ["java.lang.IllegalStateException"]},
+    {"construct": "multi-catch", "sourceIdentity": "FixtureMatrix.java#multiCatch@55-67", "bytecodeIdentity": "experiment.fixtures.FixtureMatrix#multiCatch(I)I", "sourceCc": 4, "jacocoCc": 3, "exceptionHandlerTypes": ["java.lang.IllegalArgumentException", "java.lang.IllegalStateException"]},
+    {"construct": "nested catches", "sourceIdentity": "FixtureMatrix.java#nestedCatch@69-82", "bytecodeIdentity": "experiment.fixtures.FixtureMatrix#nestedCatch(Z)I", "sourceCc": 4, "jacocoCc": 2, "exceptionHandlerTypes": ["java.lang.IllegalArgumentException", "java.lang.RuntimeException"]},
+    {"construct": "try-with-resources", "sourceIdentity": "FixtureMatrix.java#tryWithResources@97-103", "bytecodeIdentity": "experiment.fixtures.FixtureMatrix#tryWithResources()I", "sourceCc": 2, "jacocoCc": 1, "exceptionHandlerTypes": ["java.io.IOException", "java.io.IOException", "java.lang.Throwable", "java.lang.Throwable"]}
+  ],
+  "exceptionHandlerMatrix": {
+    "multi-catch": {"methodCount": 1, "exceptionHandlerCount": 2, "handlerTypes": ["java.lang.IllegalArgumentException", "java.lang.IllegalStateException"], "synchronizedMethodFlag": false},
+    "nested catches": {"methodCount": 1, "exceptionHandlerCount": 2, "handlerTypes": ["java.lang.IllegalArgumentException", "java.lang.RuntimeException"], "synchronizedMethodFlag": false},
+    "plain try/catch": {"methodCount": 1, "exceptionHandlerCount": 1, "handlerTypes": ["java.lang.IllegalStateException"], "synchronizedMethodFlag": false},
+    "synchronized block": {"methodCount": 1, "exceptionHandlerCount": 2, "handlerTypes": ["catch-all"], "synchronizedMethodFlag": false},
+    "synchronized method": {"methodCount": 1, "exceptionHandlerCount": 0, "handlerTypes": [], "synchronizedMethodFlag": true},
+    "try-with-resources": {"methodCount": 1, "exceptionHandlerCount": 4, "handlerTypes": ["java.io.IOException", "java.lang.Throwable"], "synchronizedMethodFlag": false},
+    "try/finally": {"methodCount": 1, "exceptionHandlerCount": 1, "handlerTypes": ["catch-all"], "synchronizedMethodFlag": false}
+  }
+}
