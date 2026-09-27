@@ -13,6 +13,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.NavigableMap;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.Callable;
@@ -26,10 +27,13 @@ import org.jacoco.core.tools.ExecFileLoader;
 
 import java.lang.classfile.ClassFile;
 import java.lang.classfile.ClassModel;
+import java.lang.classfile.CodeElement;
 import java.lang.classfile.CodeModel;
+import java.lang.classfile.Instruction;
 import java.lang.classfile.Label;
 import java.lang.classfile.MethodModel;
 import java.lang.classfile.instruction.ExceptionCatch;
+import java.lang.classfile.instruction.LabelTarget;
 import java.lang.classfile.instruction.LineNumber;
 import java.lang.classfile.instruction.LookupSwitchInstruction;
 import java.lang.classfile.instruction.TableSwitchInstruction;
@@ -136,6 +140,7 @@ public final class ExperimentRunner {
                         JavaMethodParser.analyze(path.getFileName().toString(), source)) {
                     methods.add(new SourceMethod(file, method.name(), method.startLine(), method.endLine(),
                             method.complexity(), method.defaultCases(), method.catchClauses(),
+                            method.defaultCaseRanges(), method.catchClauseRanges(),
                             construct(method.name())));
                 }
             }
@@ -166,25 +171,22 @@ public final class ExperimentRunner {
                             .map(LineNumber.class::cast)
                             .map(LineNumber::line)
                             .distinct().sorted().toList();
+                    CodeFacts codeFacts = method.code().map(ExperimentRunner::codeFacts)
+                            .orElseGet(CodeFacts::empty);
                     List<ExceptionCatch> exceptionHandlers = method.code().stream()
                             .flatMap(code -> code.exceptionHandlers().stream()).toList();
                     List<String> handlerTypes = exceptionHandlers.stream()
                             .map(ExperimentRunner::handlerType)
                             .sorted().toList();
-                    int switchCount = method.code().stream()
-                            .flatMap(CodeModel::elementStream)
-                            .mapToInt(element -> element instanceof TableSwitchInstruction
-                                    || element instanceof LookupSwitchInstruction ? 1 : 0)
-                            .sum();
-                    int typedHandlerTargetCount = distinctHandlerTargetCount(exceptionHandlers, true);
-                    int catchAllHandlerTargetCount = distinctHandlerTargetCount(exceptionHandlers, false);
                     String key = jacocoKey(owner, name, descriptor);
                     JacocoMethod coverage = jacoco.get(key);
                     methods.add(new BytecodeMethod(sourceFile, owner.replace('/', '.'), name, descriptor,
                             lines, coverage == null ? null : coverage.complexity(),
                             coverage == null ? null : coverage.coveredInstructions(),
                             coverage == null ? null : coverage.totalInstructions(), handlerTypes,
-                            switchCount, typedHandlerTargetCount, catchAllHandlerTargetCount,
+                            codeFacts.switchCount(), codeFacts.switchDefaultTargetLines(),
+                            codeFacts.typedHandlerTargetCount(), codeFacts.typedHandlerTargetLines(),
+                            codeFacts.catchAllHandlerTargetCount(), codeFacts.catchAllHandlerTargetLines(),
                             method.flags().has(AccessFlag.SYNTHETIC), method.flags().has(AccessFlag.BRIDGE),
                             method.flags().has(AccessFlag.SYNCHRONIZED), method.code().isPresent()));
                 }
@@ -217,14 +219,62 @@ public final class ExperimentRunner {
         return handler.catchType().map(type -> type.asInternalName().replace('/', '.')).orElse("catch-all");
     }
 
-    private static int distinctHandlerTargetCount(List<ExceptionCatch> handlers, boolean typed) {
-        Set<Label> targets = new HashSet<>();
-        for (ExceptionCatch handler : handlers) {
-            if (handler.catchType().isPresent() == typed) {
-                targets.add(handler.handler());
+    private static CodeFacts codeFacts(CodeModel code) {
+        Map<Label, Integer> positions = new LinkedHashMap<>();
+        NavigableMap<Integer, Integer> lineNumbers = new TreeMap<>();
+        int position = 0;
+        for (CodeElement element : code) {
+            if (element instanceof LabelTarget target) {
+                positions.put(target.label(), position);
+            }
+            if (element instanceof LineNumber lineNumber) {
+                lineNumbers.put(position, lineNumber.line());
+            }
+            if (element instanceof Instruction instruction) {
+                position += instruction.sizeInBytes();
             }
         }
-        return targets.size();
+
+        int switchCount = 0;
+        List<Integer> switchDefaultTargetLines = new ArrayList<>();
+        for (CodeElement element : code) {
+            Label defaultTarget = null;
+            if (element instanceof TableSwitchInstruction tableSwitch) {
+                defaultTarget = tableSwitch.defaultTarget();
+            } else if (element instanceof LookupSwitchInstruction lookupSwitch) {
+                defaultTarget = lookupSwitch.defaultTarget();
+            }
+            if (defaultTarget != null) {
+                switchCount++;
+                Integer line = targetLine(defaultTarget, positions, lineNumbers);
+                if (line != null) switchDefaultTargetLines.add(line);
+            }
+        }
+
+        Set<Label> typedTargets = new HashSet<>();
+        Set<Label> catchAllTargets = new HashSet<>();
+        List<Integer> typedHandlerTargetLines = new ArrayList<>();
+        List<Integer> catchAllHandlerTargetLines = new ArrayList<>();
+        for (ExceptionCatch handler : code.exceptionHandlers()) {
+            Set<Label> targets = handler.catchType().isPresent() ? typedTargets : catchAllTargets;
+            if (targets.add(handler.handler())) {
+                Integer line = targetLine(handler.handler(), positions, lineNumbers);
+                if (line != null) {
+                    (handler.catchType().isPresent() ? typedHandlerTargetLines : catchAllHandlerTargetLines).add(line);
+                }
+            }
+        }
+        return new CodeFacts(switchCount, switchDefaultTargetLines,
+                typedTargets.size(), typedHandlerTargetLines,
+                catchAllTargets.size(), catchAllHandlerTargetLines);
+    }
+
+    private static Integer targetLine(Label target, Map<Label, Integer> positions,
+                                      NavigableMap<Integer, Integer> lineNumbers) {
+        Integer position = positions.get(target);
+        if (position == null) return null;
+        Map.Entry<Integer, Integer> line = lineNumbers.floorEntry(position);
+        return line == null ? null : line.getValue();
     }
 
     private static String jacocoKey(String owner, String name, String descriptor) {
@@ -300,13 +350,38 @@ public final class ExperimentRunner {
 
     private static Integer sourceAlignedBytecodeComplexity(MethodPair pair) {
         BytecodeMethod method = pair.bytecode();
+        SourceMethod source = pair.source();
         if (method.jacocoComplexity() == null
-                || pair.source().defaultCaseCount() > method.switchCount()
-                || pair.source().catchClauseCount() > method.typedHandlerTargetCount()) {
+                || source.defaultCaseCount() != source.defaultCaseRanges().size()
+                || source.catchClauseCount() != source.catchClauseRanges().size()) {
             return null;
         }
-        return method.jacocoComplexity() + pair.source().defaultCaseCount()
-                + pair.source().catchClauseCount();
+        int matchedDefaults = matchedSourceRanges(source.defaultCaseRanges(), method.switchDefaultTargetLines());
+        int matchedCatches = matchedSourceRanges(source.catchClauseRanges(), method.typedHandlerTargetLines());
+        if (matchedDefaults != source.defaultCaseCount() || matchedCatches != source.catchClauseCount()) {
+            return null;
+        }
+        return method.jacocoComplexity() + matchedDefaults + matchedCatches;
+    }
+
+    private static int matchedSourceRanges(List<JavaMethodParser.SourceLineRange> ranges,
+                                          List<Integer> bytecodeTargetLines) {
+        List<Integer> unmatchedLines = new ArrayList<>(bytecodeTargetLines);
+        int matched = 0;
+        for (JavaMethodParser.SourceLineRange range : ranges) {
+            int targetIndex = -1;
+            for (int i = 0; i < unmatchedLines.size(); i++) {
+                if (range.contains(unmatchedLines.get(i))) {
+                    targetIndex = i;
+                    break;
+                }
+            }
+            if (targetIndex >= 0) {
+                unmatchedLines.remove(targetIndex);
+                matched++;
+            }
+        }
+        return matched;
     }
 
     private static String bytecodeOnlyReason(BytecodeMethod method) {
@@ -452,8 +527,11 @@ public final class ExperimentRunner {
                     .append(", \"jacocoCc\": ").append(pair.bytecode().jacocoComplexity())
                     .append(", \"sourceDefaultCases\": ").append(pair.source().defaultCaseCount())
                     .append(", \"bytecodeSwitchInstructions\": ").append(pair.bytecode().switchCount())
+                    .append(", \"bytecodeSwitchDefaultTargetLines\": ").append(integerArray(pair.bytecode().switchDefaultTargetLines()))
                     .append(", \"sourceCatchClauses\": ").append(pair.source().catchClauseCount())
                     .append(", \"bytecodeTypedHandlerTargets\": ").append(pair.bytecode().typedHandlerTargetCount())
+                    .append(", \"bytecodeTypedHandlerTargetLines\": ").append(integerArray(pair.bytecode().typedHandlerTargetLines()))
+                    .append(", \"bytecodeCatchAllHandlerTargetLines\": ").append(integerArray(pair.bytecode().catchAllHandlerTargetLines()))
                     .append(", \"sourceAlignedBytecodeCc\": ").append(adjusted == null ? "null" : adjusted)
                     .append('}');
         }
@@ -533,7 +611,7 @@ public final class ExperimentRunner {
         }
 
         report.append("### Source-aligned bytecode complexity\n\n")
-                .append("The normalized value is JaCoCo CC plus explicit source `default` labels and source `catch` clauses that are supported by at least one corresponding bytecode switch instruction or typed exception-handler target. A multi-catch contributes one source clause even when its handler table has multiple type entries. Catch-all cleanup handlers are not added. This aligns the experiment's bytecode value to the existing source parser; it is a calibration result, not an independent bytecode-only metric.\n\n")
+                .append("The normalized value is JaCoCo CC plus explicit source `default` labels and source `catch` clauses whose line ranges match the corresponding bytecode switch default target or typed handler target. A multi-catch contributes one source clause even when its handler table has multiple type entries. Catch-all cleanup handlers are not added. This aligns the experiment's bytecode value to the existing source parser; it is a calibration result, not an independent bytecode-only metric.\n\n")
                 .append("| Method | Source CC | JaCoCo CC | `default` adjustment | `catch` adjustment | Aligned bytecode CC |\n|---|---:|---:|---:|---:|---:|");
         for (MethodPair pair : comparison.pairs()) {
             Integer aligned = sourceAlignedBytecodeComplexity(pair);
@@ -652,6 +730,10 @@ public final class ExperimentRunner {
         return "[" + values.stream().map(Object::toString).reduce((a, b) -> a + ", " + b).orElse("") + "]";
     }
 
+    private static String integerArray(Collection<Integer> values) {
+        return "[" + values.stream().map(Object::toString).reduce((a, b) -> a + ", " + b).orElse("") + "]";
+    }
+
     private static String stringArray(Collection<String> values) {
         return "[" + values.stream().map(ExperimentRunner::json).reduce((a, b) -> a + ", " + b).orElse("") + "]";
     }
@@ -666,7 +748,10 @@ public final class ExperimentRunner {
     }
 
     private record SourceMethod(String file, String name, int startLine, int endLine, int complexity,
-                                int defaultCaseCount, int catchClauseCount, String construct) {
+                                int defaultCaseCount, int catchClauseCount,
+                                List<JavaMethodParser.SourceLineRange> defaultCaseRanges,
+                                List<JavaMethodParser.SourceLineRange> catchClauseRanges,
+                                String construct) {
         String identity() {
             return file + "#" + name + "@" + startLine + "-" + endLine;
         }
@@ -681,7 +766,9 @@ public final class ExperimentRunner {
     private record BytecodeMethod(String sourceFile, String owner, String name, String descriptor,
                                   List<Integer> lines, Integer jacocoComplexity, Integer coveredInstructions,
                                   Integer totalInstructions, List<String> handlerTypes, int switchCount,
-                                  int typedHandlerTargetCount, int catchAllHandlerTargetCount,
+                                  List<Integer> switchDefaultTargetLines, int typedHandlerTargetCount,
+                                  List<Integer> typedHandlerTargetLines, int catchAllHandlerTargetCount,
+                                  List<Integer> catchAllHandlerTargetLines,
                                   boolean synthetic, boolean bridge, boolean synchronizedMethod, boolean hasCode) {
         String key() {
             return owner + "#" + name + descriptor;
@@ -689,6 +776,14 @@ public final class ExperimentRunner {
     }
 
     private record BytecodeArm(List<BytecodeMethod> methods) {
+    }
+
+    private record CodeFacts(int switchCount, List<Integer> switchDefaultTargetLines,
+                             int typedHandlerTargetCount, List<Integer> typedHandlerTargetLines,
+                             int catchAllHandlerTargetCount, List<Integer> catchAllHandlerTargetLines) {
+        static CodeFacts empty() {
+            return new CodeFacts(0, List.of(), 0, List.of(), 0, List.of());
+        }
     }
 
     private record MethodPair(SourceMethod source, BytecodeMethod bytecode) {

@@ -107,9 +107,10 @@ final class JavaMethodParser {
             long bodyEndExclusive = positions.getEndPosition(unit, node.getBody());
             int startLine = lineNumber(start);
             int endLine = lineNumber(Math.decrementExact((int) bodyEndExclusive));
-            ComplexityFacts complexity = ComplexityCounter.count(node);
+            ComplexityFacts complexity = ComplexityCounter.count(node, unit, positions);
             methods.add(new MethodAnalysis(node.getName().toString(), startLine, endLine,
-                    complexity.complexity(), complexity.defaultCases(), complexity.catchClauses()));
+                    complexity.complexity(), complexity.defaultCaseCount(), complexity.catchClauseCount(),
+                    complexity.defaultCaseRanges(), complexity.catchClauseRanges()));
             return null;
         }
 
@@ -119,14 +120,36 @@ final class JavaMethodParser {
     }
 
     private static final class ComplexityCounter extends TreeScanner<Void, Void> {
+        private final CompilationUnitTree unit;
+        private final SourcePositions positions;
         private int complexity = 1;
-        private int defaultCases;
-        private int catchClauses;
+        private int defaultCaseCount;
+        private int catchClauseCount;
+        private final List<SourceLineRange> defaultCaseRanges = new ArrayList<>();
+        private final List<SourceLineRange> catchClauseRanges = new ArrayList<>();
 
-        static ComplexityFacts count(MethodTree method) {
-            ComplexityCounter counter = new ComplexityCounter();
+        private ComplexityCounter(CompilationUnitTree unit, SourcePositions positions) {
+            this.unit = unit;
+            this.positions = positions;
+        }
+
+        static ComplexityFacts count(MethodTree method, CompilationUnitTree unit, SourcePositions positions) {
+            ComplexityCounter counter = new ComplexityCounter(unit, positions);
             counter.scan(method.getBody(), null);
-            return new ComplexityFacts(counter.complexity, counter.defaultCases, counter.catchClauses);
+            return new ComplexityFacts(counter.complexity, counter.defaultCaseCount, counter.catchClauseCount,
+                    List.copyOf(counter.defaultCaseRanges),
+                    List.copyOf(counter.catchClauseRanges));
+        }
+
+        private SourceLineRange lineRange(Tree node) {
+            long start = positions.getStartPosition(unit, node);
+            long end = positions.getEndPosition(unit, node);
+            if (start < 0 || end <= start) {
+                return null;
+            }
+            int startLine = (int) unit.getLineMap().getLineNumber(start);
+            int endLine = (int) unit.getLineMap().getLineNumber(end - 1);
+            return new SourceLineRange(startLine, endLine);
         }
 
         @Override
@@ -167,7 +190,9 @@ final class JavaMethodParser {
         @Override
         public Void visitCatch(CatchTree node, Void unused) {
             complexity++;
-            catchClauses++;
+            catchClauseCount++;
+            SourceLineRange lines = lineRange(node);
+            if (lines != null) catchClauseRanges.add(lines);
             return super.visitCatch(node, unused);
         }
 
@@ -181,7 +206,9 @@ final class JavaMethodParser {
         public Void visitCase(CaseTree node, Void unused) {
             complexity++;
             if (node.getExpressions().isEmpty()) {
-                defaultCases++;
+                defaultCaseCount++;
+                SourceLineRange lines = lineRange(node);
+                if (lines != null) defaultCaseRanges.add(lines);
             }
             return super.visitCase(node, unused);
         }
@@ -195,11 +222,20 @@ final class JavaMethodParser {
         }
     }
 
-    record MethodAnalysis(String name, int startLine, int endLine, int complexity,
-                          int defaultCases, int catchClauses) {
+    record SourceLineRange(int startLine, int endLine) {
+        boolean contains(int line) {
+            return line >= startLine && line <= endLine;
+        }
     }
 
-    private record ComplexityFacts(int complexity, int defaultCases, int catchClauses) {
+    record MethodAnalysis(String name, int startLine, int endLine, int complexity,
+                          int defaultCases, int catchClauses,
+                          List<SourceLineRange> defaultCaseRanges, List<SourceLineRange> catchClauseRanges) {
+    }
+
+    private record ComplexityFacts(int complexity, int defaultCaseCount, int catchClauseCount,
+                                   List<SourceLineRange> defaultCaseRanges,
+                                   List<SourceLineRange> catchClauseRanges) {
     }
 
     private static final class SourceFileObject extends SimpleJavaFileObject {
