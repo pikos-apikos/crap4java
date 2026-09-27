@@ -22,12 +22,12 @@ import org.jacoco.core.analysis.IClassCoverage;
 import org.jacoco.core.analysis.IMethodCoverage;
 import org.jacoco.core.tools.ExecFileLoader;
 
-import java.lang.classfile.AccessFlag;
 import java.lang.classfile.ClassFile;
 import java.lang.classfile.ClassModel;
 import java.lang.classfile.MethodModel;
 import java.lang.classfile.instruction.ExceptionCatch;
 import java.lang.classfile.instruction.LineNumber;
+import java.lang.reflect.AccessFlag;
 
 /** Runs the source-oracle and bytecode-candidate arms on one fixed evidence set. */
 public final class ExperimentRunner {
