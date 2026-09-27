@@ -29,6 +29,16 @@ For each invocation:
 mvn test
 ```
 
+## Java 25 bytecode experiment
+
+The bounded source-versus-bytecode parity and performance experiment is described in
+[`experiment/README.md`](experiment/README.md). It is test-scoped and leaves the
+production CRAP analyzer and report behavior unchanged.
+
+```bash
+bash experiment/run.sh
+```
+
 ## Run
 
 Build the jar:

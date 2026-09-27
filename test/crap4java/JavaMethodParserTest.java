@@ -10,6 +10,57 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 class JavaMethodParserTest {
 
     @Test
+    void exposesExplicitDefaultsAndCatchClauseCountsForExperimentAlignment() {
+        String source = """
+                class Sample {
+                    int switched(int value) {
+                        switch (value) {
+                            case 1: return 1;
+                            default: return 0;
+                        }
+                    }
+
+                    int switchWithoutDefault(int value) {
+                        switch (value) {
+                            case 1: return 1;
+                        }
+                        return 0;
+                    }
+
+                    int caught(int value) {
+                        try {
+                            if (value == 0) throw new IllegalArgumentException();
+                            return value;
+                        } catch (IllegalArgumentException first) {
+                            return -1;
+                        } catch (IndexOutOfBoundsException second) {
+                            return -2;
+                        }
+                    }
+                }
+                """;
+
+        List<JavaMethodParser.MethodAnalysis> methods = JavaMethodParser.analyze("Sample", source);
+        JavaMethodParser.MethodAnalysis switched = methods.stream()
+                .filter(method -> method.name().equals("switched")).findFirst().orElseThrow();
+        JavaMethodParser.MethodAnalysis caught = methods.stream()
+                .filter(method -> method.name().equals("caught")).findFirst().orElseThrow();
+        JavaMethodParser.MethodAnalysis switchWithoutDefault = methods.stream()
+                .filter(method -> method.name().equals("switchWithoutDefault")).findFirst().orElseThrow();
+
+        assertEquals(3, switched.complexity());
+        assertEquals(1, switched.defaultCases());
+        assertEquals(0, switched.catchClauses());
+        assertEquals(2, switchWithoutDefault.complexity());
+        assertEquals(0, switchWithoutDefault.defaultCases());
+        assertEquals(4, caught.complexity());
+        assertEquals(0, caught.defaultCases());
+        assertEquals(2, caught.catchClauses());
+        assertEquals(methods.stream().map(JavaMethodParser.MethodAnalysis::complexity).toList(),
+                JavaMethodParser.parse("Sample", source).stream().map(MethodDescriptor::complexity).toList());
+    }
+
+    @Test
     void extractsConcreteMethodsWithLinesAndComplexity() {
         String source = """
                 package demo;
