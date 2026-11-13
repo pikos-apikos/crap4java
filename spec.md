@@ -165,6 +165,9 @@ The parser shall identify concrete method declarations and their basic attribute
 - cyclomatic complexity
 
 The parser shall not require full semantic resolution of sibling or external symbols in order to extract methods.
+After syntax extraction, compiler attribution shall provide binary class names and JVM
+descriptors where the erased signature types can be resolved. Unresolved signatures
+shall not prevent extraction of source locations or complexity.
 
 ### 8.1 Exclusions
 
@@ -184,7 +187,15 @@ The resulting complexity shall be an integer `CC >= 1` for concrete methods.
 
 Coverage shall be attributed to methods by matching parsed methods to JaCoCo coverage data.
 
-If an exact coverage entry for a method cannot be found, the tool may use the nearest appropriate available coverage entry according to its implemented lookup rules.
+The matching identity shall be the binary class name, method name and full JVM
+descriptor from JaCoCo. Source signatures shall use compiler-resolved types and JVM
+erasure, including type-variable bounds, arrays and varargs. Return types shall be
+included so compiler bridge methods cannot supply another method's coverage.
+
+Line proximity, XML order, simple type names and parameter count shall not substitute
+for signature identity. Missing descriptors or unresolved erased source signature types
+shall produce no coverage match. Duplicate JaCoCo identities shall be rejected as
+ambiguous input rather than selecting the first or last entry.
 
 If no usable coverage data is available for a method:
 

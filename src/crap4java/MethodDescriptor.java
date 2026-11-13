@@ -4,7 +4,8 @@ record MethodDescriptor(
         String name,
         int startLine,
         int endLine,
-        int complexity
+        int complexity,
+        MethodIdentity identity
 ) {
 }
 

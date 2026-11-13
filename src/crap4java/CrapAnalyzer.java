@@ -18,8 +18,10 @@ final class CrapAnalyzer {
     }
 
     static List<MethodMetrics> analyze(Path projectRoot, List<Path> changedFiles, Path jacocoXml) throws IOException {
-        Map<String, CoverageData> coverageMap = JacocoCoverageParser.parse(jacocoXml);
+        Map<MethodIdentity, CoverageData> coverageMap = JacocoCoverageParser.parse(jacocoXml);
         List<MethodMetrics> metrics = new ArrayList<>();
+        List<Path> classPath = List.of(projectRoot.resolve("target/classes"),
+                projectRoot.resolve("target/test-classes")).stream().filter(Files::isDirectory).toList();
 
         for (Path file : changedFiles) {
             if (!Files.exists(file)) {
@@ -27,11 +29,12 @@ final class CrapAnalyzer {
             }
             String source = Files.readString(file);
             String className = classNameFromSource(file, source);
-            List<MethodDescriptor> methods = JavaMethodParser.parse(className, source);
+            List<MethodDescriptor> methods = JavaMethodParser.parse(className, source, classPath);
             for (MethodDescriptor method : methods) {
-                Double coverage = lookupCoverage(coverageMap, className, method.name(), method.startLine());
+                Double coverage = lookupCoverage(coverageMap, method.identity());
                 Double crap = CrapScore.calculate(method.complexity(), coverage);
-                metrics.add(new MethodMetrics(method.name(), className, method.complexity(), coverage, crap));
+                String owner = method.identity() == null ? className : method.identity().className();
+                metrics.add(new MethodMetrics(method.name(), owner, method.complexity(), coverage, crap));
             }
         }
 
@@ -49,70 +52,13 @@ final class CrapAnalyzer {
         return matcher.group(1) + "." + simpleName;
     }
 
-    static Double lookupCoverage(Map<String, CoverageData> coverageMap,
-                                 String className,
-                                 String methodName,
-                                 int line) {
-        Double exactCoverage = exactCoverage(coverageMap, className, methodName, line);
-        if (exactCoverage != null) {
-            return exactCoverage;
-        }
-
-        CoverageData nearest = nearestCoverage(coverageMap, className, methodName, line);
-        if (nearest == null) {
+    static Double lookupCoverage(Map<MethodIdentity, CoverageData> coverageMap,
+                                 MethodIdentity identity) {
+        if (identity == null || identity.descriptor() == null) {
             return null;
         }
-        return nearest.coveragePercent();
-    }
-
-    static Double exactCoverage(Map<String, CoverageData> coverageMap,
-                                String className,
-                                String methodName,
-                                int line) {
-        String exactKey = className + "#" + methodName + ":" + line;
-        CoverageData exact = coverageMap.get(exactKey);
-        if (exact == null) {
-            return null;
-        }
-        return exact.coveragePercent();
-    }
-
-    static CoverageData nearestCoverage(Map<String, CoverageData> coverageMap,
-                                        String className,
-                                        String methodName,
-                                        int line) {
-        String prefix = className + "#" + methodName + ":";
-        CoverageData nearest = null;
-        int nearestDistance = Integer.MAX_VALUE;
-        for (Map.Entry<String, CoverageData> entry : coverageMap.entrySet()) {
-            String key = entry.getKey();
-            if (!key.startsWith(prefix)) {
-                continue;
-            }
-            int jacocoLine = parseTrailingLine(key);
-            int distance = Math.abs(jacocoLine - line);
-            if (distance < nearestDistance) {
-                nearestDistance = distance;
-                nearest = entry.getValue();
-            }
-        }
-        return nearest;
-    }
-
-    static int parseTrailingLine(String key) {
-        int separator = key.lastIndexOf(':');
-        if (separator < 0) {
-            return Integer.MAX_VALUE;
-        }
-        String lineText = key.substring(separator + 1);
-        if (lineText.isEmpty()) {
-            return Integer.MAX_VALUE;
-        }
-        try {
-            return Integer.parseInt(lineText);
-        } catch (NumberFormatException ex) {
-            return Integer.MAX_VALUE;
-        }
+        CoverageData coverage = coverageMap.get(identity);
+        return coverage == null ? null : coverage.coveragePercent();
     }
 }
 
