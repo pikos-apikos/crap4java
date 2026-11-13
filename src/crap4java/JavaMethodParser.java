@@ -15,16 +15,21 @@ import com.sun.source.tree.Tree;
 import com.sun.source.tree.WhileLoopTree;
 import com.sun.source.util.JavacTask;
 import com.sun.source.util.SourcePositions;
+import com.sun.source.util.TreePath;
 import com.sun.source.util.TreeScanner;
 import com.sun.source.util.TreePathScanner;
 import com.sun.source.util.Trees;
 
+import javax.lang.model.element.ExecutableElement;
+import javax.lang.model.element.TypeElement;
 import javax.tools.JavaCompiler;
 import javax.tools.SimpleJavaFileObject;
+import javax.tools.StandardLocation;
 import javax.tools.ToolProvider;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.URI;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -34,17 +39,22 @@ final class JavaMethodParser {
     }
 
     static List<MethodDescriptor> parse(String className, String source) {
+        return parse(className, source, List.of());
+    }
+
+    static List<MethodDescriptor> parse(String className, String source, List<Path> classPath) {
         JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
         if (compiler == null) {
             throw new IllegalStateException("No system Java compiler is available");
         }
 
-        try {
+        try (var fileManager = compiler.getStandardFileManager(null, null, null)) {
+            fileManager.setLocationFromPaths(StandardLocation.CLASS_PATH, classPath);
             JavacTask task = (JavacTask) compiler.getTask(
                     null,
-                    null,
-                    null,
-                    List.of("-proc:none"),
+                    fileManager,
+                    diagnostic -> { },
+                    List.of("-proc:none", "-implicit:none"),
                     null,
                     List.of(new SourceFileObject(className, source))
             );
@@ -67,12 +77,28 @@ final class JavaMethodParser {
     }
 
     private static List<MethodDescriptor> collectMethods(JavacTask task,
-                                                         Iterable<? extends CompilationUnitTree> units) {
+                                                         Iterable<? extends CompilationUnitTree> units) throws IOException {
         Trees trees = Trees.instance(task);
         List<MethodDescriptor> methods = new ArrayList<>();
+        List<TreePath> paths = new ArrayList<>();
         for (CompilationUnitTree unit : units) {
             SourcePositions positions = trees.getSourcePositions();
-            new MethodScanner(unit, positions, methods).scan(unit, null);
+            new MethodScanner(unit, positions, methods, paths).scan(unit, null);
+        }
+        // Capture source locations and complexity before attribution mutates the trees.
+        // Missing dependencies must not prevent syntax-only method extraction.
+        task.analyze();
+        for (int i = 0; i < methods.size(); i++) {
+            MethodDescriptor method = methods.get(i);
+            MethodIdentity identity = null;
+            if (trees.getElement(paths.get(i)) instanceof ExecutableElement executable
+                    && executable.getEnclosingElement() instanceof TypeElement owner) {
+                String descriptor = JvmDescriptor.of(executable, task.getTypes(), task.getElements());
+                identity = new MethodIdentity(task.getElements().getBinaryName(owner).toString(),
+                        method.name(), descriptor);
+            }
+            methods.set(i, new MethodDescriptor(method.name(), method.startLine(), method.endLine(),
+                    method.complexity(), identity));
         }
         return methods;
     }
@@ -81,13 +107,16 @@ final class JavaMethodParser {
         private final CompilationUnitTree unit;
         private final SourcePositions positions;
         private final List<MethodDescriptor> methods;
+        private final List<TreePath> paths;
 
         private MethodScanner(CompilationUnitTree unit,
                               SourcePositions positions,
-                              List<MethodDescriptor> methods) {
+                              List<MethodDescriptor> methods,
+                              List<TreePath> paths) {
             this.unit = unit;
             this.positions = positions;
             this.methods = methods;
+            this.paths = paths;
         }
 
         @Override
@@ -101,7 +130,8 @@ final class JavaMethodParser {
             int startLine = lineNumber(start);
             int endLine = lineNumber(Math.decrementExact((int) bodyEndExclusive));
             int complexity = ComplexityCounter.count(node);
-            methods.add(new MethodDescriptor(node.getName().toString(), startLine, endLine, complexity));
+            methods.add(new MethodDescriptor(node.getName().toString(), startLine, endLine, complexity, null));
+            paths.add(getCurrentPath());
             return null;
         }
 

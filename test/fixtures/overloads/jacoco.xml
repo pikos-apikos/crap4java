@@ -1,0 +1,14 @@
+<report name="issue-3-equal-distance-overloads">
+  <package name="">
+    <class name="Validator" sourcefilename="Validator.java">
+      <method name="validate" desc="(Ljava/util/Map;Ljava/util/UUID;)Z" line="20">
+        <counter type="INSTRUCTION" missed="40" covered="0"/>
+        <counter type="BRANCH" missed="4" covered="0"/>
+      </method>
+      <method name="validate" desc="(Ljava/util/Map;Ljava/util/UUID;Ljava/util/List;)Z" line="26">
+        <counter type="INSTRUCTION" missed="0" covered="80"/>
+        <counter type="BRANCH" missed="0" covered="8"/>
+      </method>
+    </class>
+  </package>
+</report>

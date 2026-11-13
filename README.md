@@ -72,4 +72,12 @@ java -jar target/crap4java-0.1.0-SNAPSHOT.jar module-a module-b
 ## Notes
 
 - If JaCoCo XML is missing, coverage is reported as `N/A`.
+- Coverage matching uses the binary class name, method name and full JVM descriptor;
+  declaration/executable line distances and XML ordering do not select overloads.
+- The existing JDK AST parser extracts methods before compiler attribution. Resolved
+  signature types use JVM erasure (including generic bounds, arrays and varargs).
+  Standard Maven `target/classes` and `target/test-classes` directories are available
+  for resolving sibling types. External dependency jars and custom output directories
+  are not automatically added to the compiler classpath. If any erased signature type
+  remains unresolved, coverage and CRAP stay `N/A`; no other overload is substituted.
 - Report output is sorted by CRAP descending, with `N/A` at the bottom.

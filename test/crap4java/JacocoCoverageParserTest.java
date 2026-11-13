@@ -11,6 +11,7 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class JacocoCoverageParserTest {
 
@@ -35,10 +36,10 @@ class JacocoCoverageParserTest {
                 </report>
                 """);
 
-        Map<String, CoverageData> result = JacocoCoverageParser.parse(xml);
+        Map<MethodIdentity, CoverageData> result = JacocoCoverageParser.parse(xml);
 
-        assertEquals(90.0, result.get("demo.Sample#alpha:10").coveragePercent(), 0.001);
-        assertEquals(0.0, result.get("demo.Sample#beta:20").coveragePercent(), 0.001);
+        assertEquals(90.0, result.get(new MethodIdentity("demo.Sample", "alpha", "()V")).coveragePercent(), 0.001);
+        assertEquals(0.0, result.get(new MethodIdentity("demo.Sample", "beta", "()V")).coveragePercent(), 0.001);
     }
 
     @Test
@@ -57,13 +58,13 @@ class JacocoCoverageParserTest {
                 </report>
                 """);
 
-        Map<String, CoverageData> result = JacocoCoverageParser.parse(xml);
+        Map<MethodIdentity, CoverageData> result = JacocoCoverageParser.parse(xml);
 
-        assertEquals(90.0, result.get("demo.Sample#alpha:10").coveragePercent(), 0.001);
+        assertEquals(90.0, result.get(new MethodIdentity("demo.Sample", "alpha", "()V")).coveragePercent(), 0.001);
     }
 
     @Test
-    void parsesInvalidLineNumbersAsZero() throws IOException {
+    void matchesByDescriptorEvenWhenLineNumberIsInvalid() throws IOException {
         Path xml = tempDir.resolve("jacoco-invalid-line.xml");
         Files.writeString(xml, """
                 <report name="demo">
@@ -77,9 +78,9 @@ class JacocoCoverageParserTest {
                 </report>
                 """);
 
-        Map<String, CoverageData> result = JacocoCoverageParser.parse(xml);
+        Map<MethodIdentity, CoverageData> result = JacocoCoverageParser.parse(xml);
 
-        assertEquals(90.0, result.get("demo.Sample#alpha:0").coveragePercent(), 0.001);
+        assertEquals(90.0, result.get(new MethodIdentity("demo.Sample", "alpha", "()V")).coveragePercent(), 0.001);
     }
 
     @Test
@@ -93,5 +94,49 @@ class JacocoCoverageParserTest {
         assertTrue(factory.getFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd"));
         assertFalse(factory.isXIncludeAware());
         assertFalse(factory.isExpandEntityReferences());
+    }
+
+    @Test
+    void retainsOverloadsOnTheSameLineAndUsesOnlyInstructionCounters() throws IOException {
+        Path xml = tempDir.resolve("same-line.xml");
+        Files.writeString(xml, """
+                <report><class name="demo/Sample">
+                  <method name="alpha" desc="(I)I" line="10">
+                    <counter type="BRANCH" missed="0" covered="8"/>
+                    <counter type="INSTRUCTION" missed="3" covered="1"/>
+                  </method>
+                  <method name="alpha" desc="(J)I" line="10">
+                    <counter type="INSTRUCTION" missed="1" covered="3"/>
+                  </method>
+                  <method name="alpha" desc="(D)I" line="10">
+                    <counter type="BRANCH" missed="0" covered="8"/>
+                  </method>
+                  <method name="alpha" line="10">
+                    <counter type="INSTRUCTION" missed="0" covered="8"/>
+                  </method>
+                </class></report>
+                """);
+
+        var result = JacocoCoverageParser.parse(xml);
+        assertEquals(2, result.size());
+        assertEquals(25.0, result.get(new MethodIdentity("demo.Sample", "alpha", "(I)I")).coveragePercent());
+        assertEquals(75.0, result.get(new MethodIdentity("demo.Sample", "alpha", "(J)I")).coveragePercent());
+    }
+
+    @Test
+    void rejectsDuplicateIdentitiesRatherThanSelectingByXmlOrder() throws IOException {
+        Path xml = tempDir.resolve("duplicate.xml");
+        Files.writeString(xml, """
+                <report><class name="Sample">
+                  <method name="alpha" desc="()I" line="10">
+                    <counter type="INSTRUCTION" missed="0" covered="8"/>
+                  </method>
+                  <method name="alpha" desc="()I" line="20">
+                    <counter type="INSTRUCTION" missed="8" covered="0"/>
+                  </method>
+                </class></report>
+                """);
+
+        assertThrows(IllegalStateException.class, () -> JacocoCoverageParser.parse(xml));
     }
 }

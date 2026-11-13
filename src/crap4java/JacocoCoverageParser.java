@@ -19,7 +19,7 @@ final class JacocoCoverageParser {
     private JacocoCoverageParser() {
     }
 
-    static Map<String, CoverageData> parse(Path jacocoXmlPath) {
+    static Map<MethodIdentity, CoverageData> parse(Path jacocoXmlPath) {
         if (jacocoXmlPath == null || !Files.exists(jacocoXmlPath)) {
             return Map.of();
         }
@@ -32,7 +32,7 @@ final class JacocoCoverageParser {
 
             Document document = builder.parse(jacocoXmlPath.toFile());
             NodeList classes = document.getElementsByTagName("class");
-            Map<String, CoverageData> coverage = new HashMap<>();
+            Map<MethodIdentity, CoverageData> coverage = new HashMap<>();
 
             for (int i = 0; i < classes.getLength(); i++) {
                 Element classNode = (Element) classes.item(i);
@@ -58,7 +58,8 @@ final class JacocoCoverageParser {
         return factory;
     }
 
-    private static void readClassMethods(Element classNode, String className, Map<String, CoverageData> coverage) {
+    private static void readClassMethods(Element classNode, String className,
+                                         Map<MethodIdentity, CoverageData> coverage) {
         for (Node node = classNode.getFirstChild(); node != null; node = node.getNextSibling()) {
             if (!(node instanceof Element method) || !"method".equals(method.getTagName())) {
                 continue;
@@ -68,9 +69,14 @@ final class JacocoCoverageParser {
                 continue;
             }
             String methodName = method.getAttribute("name");
-            int line = parseInt(method.getAttribute("line"));
-            String key = className + "#" + methodName + ":" + line;
-            coverage.put(key, data);
+            String descriptor = method.getAttribute("desc");
+            if (descriptor.isEmpty()) {
+                continue;
+            }
+            MethodIdentity key = new MethodIdentity(className, methodName, descriptor);
+            if (coverage.putIfAbsent(key, data) != null) {
+                throw new IllegalStateException("Duplicate JaCoCo method identity: " + key);
+            }
         }
     }
 
